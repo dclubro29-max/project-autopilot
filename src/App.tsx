@@ -1,15 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import {
-  buildDemoProject,
   formatDuration,
   getProjectMetrics,
   getStatusClass,
   loadProjects,
-  nextProjectState,
-  pipelineStages,
   saveProjects,
   statusTone
 } from './lib/autopilot';
+import { ProjectExecutor } from './lib/executor';
 import type { EvidenceItem, Project, ProjectDraft, VerificationStatus } from './types';
 
 const navItems = [
@@ -31,6 +29,8 @@ function App() {
   const [createOpen, setCreateOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [wizardStep, setWizardStep] = useState(0);
+  const [executor] = useState(() => new ProjectExecutor());
+  const [isExecuting, setIsExecuting] = useState(false);
   const [wizard, setWizard] = useState<ProjectDraft>({
     name: 'Fresh Project',
     type: 'Software',
@@ -63,13 +63,6 @@ function App() {
     saveProjects(projects);
   }, [projects]);
 
-  useEffect(() => {
-    const interval = window.setInterval(() => {
-      setProjects((previous) => previous.map((project) => nextProjectState(project)));
-    }, 5000);
-    return () => window.clearInterval(interval);
-  }, []);
-
   const createProject = () => {
     const nextProject = {
       name: wizard.name || 'Autopilot Project',
@@ -88,8 +81,8 @@ function App() {
       }
     };
 
+    const now = new Date().toISOString();
     const project: Project = {
-      ...buildDemoProject(),
       id: `project-${Date.now()}`,
       name: nextProject.name,
       type: nextProject.type,
@@ -100,37 +93,97 @@ function App() {
       status: 'running',
       currentStage: 'ANALYZE',
       permissions: nextProject.permissions,
+      createdAt: now,
+      updatedAt: now,
+      runtimeMs: 0,
+      projectStep: 0,
+      latestVerification: 'Awaiting execution',
       tasks: [
         {
           id: 't-1',
           title: 'Audit project state',
-          description: nextProject.goal,
+          description: 'Inspect the workspace, repo metadata, and likely constraints before building.',
           priority: 'CRITICAL',
-          status: 'RUNNING',
+          status: 'QUEUED',
           dependencies: [],
-          verification: 'Project captured and actionable next step identified.',
-          attempts: 1,
+          verification: 'Project structure and blocker analysis captured.',
+          attempts: 0,
           runtimeMs: 0
         },
         {
           id: 't-2',
           title: 'Define implementation plan',
-          description: 'Turn the objective into a concrete engineering plan.',
+          description: 'Capture the work plan and identify the most valuable next engineering step.',
           priority: 'HIGH',
           status: 'QUEUED',
           dependencies: ['t-1'],
-          verification: 'Plan matches the goal and has clear validation steps.',
+          verification: 'Task plan is meaningful and traceable to the project goal.',
           attempts: 0,
           runtimeMs: 0
+        },
+        {
+          id: 't-3',
+          title: 'Implement core feature',
+          description: 'Build the primary functionality based on the goal.',
+          priority: 'HIGH',
+          status: 'QUEUED',
+          dependencies: ['t-2'],
+          verification: 'Code changes are complete and reviewed.',
+          attempts: 0,
+          runtimeMs: 0
+        },
+        {
+          id: 't-4',
+          title: 'Verify with tests',
+          description: 'Run test suite and ensure all critical paths pass.',
+          priority: 'HIGH',
+          status: 'QUEUED',
+          dependencies: ['t-3'],
+          verification: 'Tests execute and result is PASS.',
+          attempts: 0,
+          runtimeMs: 0
+        },
+        {
+          id: 't-5',
+          title: 'Document and finalize',
+          description: 'Update docs and prepare final report.',
+          priority: 'NORMAL',
+          status: 'QUEUED',
+          dependencies: ['t-4'],
+          verification: 'Final report and documentation complete.',
+          attempts: 0,
+          runtimeMs: 0
+        }
+      ],
+      workspace: [
+        {
+          path: 'README.md',
+          content: `# ${nextProject.name}\n\n${nextProject.goal}\n`,
+          changed: false
+        },
+        {
+          path: 'src/main.js',
+          content: "export function main() {\n  return 'initialized';\n}\n",
+          changed: false
+        },
+        {
+          path: 'src/feature.js',
+          content: "export function feature() {\n  // placeholder\n}\n",
+          changed: false
+        },
+        {
+          path: 'test/main.test.js',
+          content: "describe('main', () => {\n  it('works', () => {\n    expect(true).toBe(true);\n  });\n});\n",
+          changed: false
         }
       ],
       timeline: [
         {
           id: `${Date.now()}-startup`,
-          timestamp: new Date().toISOString(),
+          timestamp: now,
           kind: 'Task started',
           label: 'Task started',
-          detail: 'Audit project state',
+          detail: 'Project initialized and ready',
           filePath: 'README.md'
         }
       ],
@@ -141,19 +194,33 @@ function App() {
         {
           id: `doc-${Date.now()}`,
           title: 'BUILD_LOG.md',
-          contents: `# ${nextProject.name}\n\nInitial workspace created with objective captured.\n`,
-          updatedAt: new Date().toISOString()
+          contents: `# ${nextProject.name}\n\nProject created and ready for execution.\n`,
+          updatedAt: now
         }
-      ],
-      latestVerification: 'Awaiting first verification',
-      projectStep: 0
+      ]
     };
 
     setProjects((previous) => [project, ...previous]);
     setSelectedProjectId(project.id);
     setCreateOpen(false);
     setWizardStep(0);
-    setView('command-center');
+    setView('projects');
+  };
+
+  const startAgent = async () => {
+    if (!selectedProject || isExecuting) return;
+
+    setIsExecuting(true);
+    try {
+      const result = await executor.run(selectedProject);
+      setProjects((prev) =>
+        prev.map((p) => (p.id === selectedProject.id ? result : p))
+      );
+    } catch (error) {
+      console.error('Execution error:', error);
+    } finally {
+      setIsExecuting(false);
+    }
   };
 
   const projectMetrics = selectedProject ? getProjectMetrics(selectedProject) : { complete: 0, percent: 0, testPass: 0, filesChanged: 0, milestoneCount: 0 };
@@ -175,27 +242,12 @@ function App() {
     { title: 'Autonomy', content: (
       <label className="full-width">Autonomy mode<select value={wizard.autonomy} onChange={(e) => setWizard({ ...wizard, autonomy: e.target.value as ProjectDraft['autonomy'] })}><option value="SUPERVISED">SUPERVISED — Ask before meaningful changes.</option><option value="STANDARD">STANDARD — Autonomous local development with human approval for consequential actions.</option><option value="AUTONOMOUS">AUTONOMOUS — Continue automatically while respecting safety boundaries.</option></select></label>
     ) },
-    { title: 'Permissions', content: (
-      <div className="permission-grid">
-        {Object.entries(wizard.permissions ?? {
-          readFiles: 'ALLOW',
-          modifyFiles: 'ALLOW',
-          runTerminal: 'ALLOW',
-          installPackages: 'ASK',
-          gitCommit: 'ALLOW',
-          gitPush: 'DENY'
-        }).map(([key, value]) => (
-          <label key={key}>{key.replace(/([A-Z])/g, ' $1').replace(/^./, str => str.toUpperCase())}<select value={value} onChange={(e) => setWizard({ ...wizard, permissions: { ...(wizard.permissions ?? { readFiles: 'ALLOW', modifyFiles: 'ALLOW', runTerminal: 'ALLOW', installPackages: 'ASK', gitCommit: 'ALLOW', gitPush: 'DENY' }), [key]: e.target.value as 'ALLOW' | 'ASK' | 'DENY' } })}>{['ALLOW','ASK','DENY'].map((option) => <option key={option} value={option}>{option}</option>)}</select></label>
-        ))}
-      </div>
-    ) },
     { title: 'Review', content: (
       <div className="review-box">
         <div><strong>Project</strong> {wizard.name}</div>
         <div><strong>Type</strong> {wizard.type}</div>
         <div><strong>Goal</strong> {wizard.goal}</div>
         <div><strong>Autonomy</strong> {wizard.autonomy}</div>
-        <div><strong>Permissions</strong> {Object.entries(wizard.permissions ?? {}).map(([k,v]) => `${k}:${v}`).join(' · ')}</div>
       </div>
     ) }
   ];
@@ -218,7 +270,7 @@ function App() {
         </nav>
 
         <div className="sidebar-footer">
-          <div className="model-pill"><span className="indicator online" /> {sidebarOpen ? 'OpenAI · GPT-4.1' : 'AI'}</div>
+          <div className="model-pill"><span className="indicator online" /> {sidebarOpen ? 'Agent Executor' : 'AE'}</div>
           <button className="mini-button" onClick={() => setSidebarOpen((value) => !value)}>{sidebarOpen ? 'Collapse' : 'Expand'}</button>
         </div>
       </aside>
@@ -238,9 +290,9 @@ function App() {
                 </div>
               </div>
               <div className="top-actions">
-                <button className="ghost-button">Pause</button>
-                <button className="ghost-button">Resume</button>
-                <button className="primary-button">Stop</button>
+                <button className="primary-button" onClick={startAgent} disabled={isExecuting || selectedProject.status !== 'running'}>
+                  {isExecuting ? 'RUNNING...' : 'START AGENT'}
+                </button>
               </div>
             </>
           ) : (
@@ -276,8 +328,6 @@ function App() {
                     </div>
                     <div className="row-detail action-col">
                       <button onClick={() => { setSelectedProjectId(project.id); setView('projects'); }}>Open</button>
-                      <button>Pause</button>
-                      <button>Resume</button>
                     </div>
                   </div>
                 ))}
@@ -292,7 +342,7 @@ function App() {
                     <div className="milestone-title">M{milestone.number} · {milestone.title}</div>
                     <div className="muted">{milestone.goal}</div>
                   </div>
-                ))}
+                )) || <div className="muted">No milestones yet</div>}
               </div>
             </section>
           </div>
@@ -304,7 +354,7 @@ function App() {
               <div className="panel-header compact">
                 <div>
                   <div className="eyebrow">CURRENT OPERATION</div>
-                  <h2>{selectedProject.tasks.find((task) => task.status === 'RUNNING')?.title ?? 'Analyzing workspace'}</h2>
+                  <h2>{selectedProject.tasks.find((task) => task.status === 'RUNNING')?.title ?? 'Ready for execution'}</h2>
                 </div>
                 <div className="status-badge alt">{selectedProject.currentStage}</div>
               </div>
@@ -315,14 +365,6 @@ function App() {
                 <Metric value={String(projectMetrics.testPass)} label="Tests passing" />
                 <Metric value={String(projectMetrics.milestoneCount)} label="Milestones" />
                 <Metric value={String(projectMetrics.filesChanged)} label="Files changed" />
-              </div>
-              <div className="pipeline">
-                {pipelineStages.map((stage, index) => (
-                  <div key={stage} className={`pipeline-step ${stage === selectedProject.currentStage ? 'current' : ''}`}>
-                    <span>{index + 1}</span>
-                    <strong>{stage}</strong>
-                  </div>
-                ))}
               </div>
             </section>
 
@@ -346,7 +388,7 @@ function App() {
                     <div key={task.id} className="task-row">
                       <div className="task-head"><span className="task-id">{task.id}</span><span className="task-status">{task.status}</span></div>
                       <div className="task-title">{task.title}</div>
-                      <div className="task-meta">{task.priority} · {task.verification}</div>
+                      <div className="task-meta">{task.priority} · Attempts: {task.attempts}</div>
                     </div>
                   ))}
                 </div>
@@ -357,25 +399,19 @@ function App() {
 
         {view === 'evidence' && (
           <div className="page-stack">
-            <section className="panel"><div className="panel-header"><h2>EVIDENCE</h2></div><div className="evidence-grid">{(selectedProject?.evidence ?? []).map((evidence) => <EvidenceCard key={evidence.id} item={evidence} />)}</div></section>
+            <section className="panel"><div className="panel-header"><h2>EVIDENCE</h2></div><div className="evidence-grid">{(selectedProject?.evidence ?? []).map((evidence) => <EvidenceCard key={evidence.id} item={evidence} />) || <div className="muted">No evidence yet</div>}</div></section>
           </div>
         )}
 
         {view === 'tests' && (
           <div className="page-stack">
-            <section className="panel"><div className="panel-header"><h2>TEST CENTER</h2></div><div className="test-list">{(selectedProject?.tests ?? []).map((test) => <div key={test.id} className="test-row"><div className="test-topline"><strong>{test.command}</strong><span className={`verification-pill ${statusTone[test.status as VerificationStatus]}`}>{test.status}</span></div><div className="muted">{test.summary}</div><div className="task-meta">{test.details.join(' · ')}</div></div>)}</div></section>
+            <section className="panel"><div className="panel-header"><h2>TEST CENTER</h2></div><div className="test-list">{(selectedProject?.tests ?? []).map((test) => <div key={test.id} className="test-row"><div className="test-topline"><strong>{test.command}</strong><span className={`verification-pill ${statusTone[test.status as VerificationStatus]}`}>{test.status}</span></div><div className="muted">{test.summary}</div></div>)} || <div className="muted">No tests run yet</div></div></section>
           </div>
         )}
 
         {view === 'docs' && (
           <div className="page-stack">
             <section className="panel"><div className="panel-header"><h2>DOCUMENTATION</h2></div><div className="doc-stack">{(selectedProject?.documents ?? []).map((doc) => <pre key={doc.id} className="doc-block">{doc.contents}</pre>)}</div></section>
-          </div>
-        )}
-
-        {view === 'settings' && (
-          <div className="page-stack">
-            <section className="panel settings-grid"><div><h2>General</h2><div className="setting-row"><span>Model</span><strong>GPT-4.1</strong></div><div className="setting-row"><span>Autonomy</span><strong>{selectedProject?.autonomy ?? 'STANDARD'}</strong></div></div><div><h2>Permissions</h2><div className="setting-row"><span>Run terminal</span><strong>{selectedProject?.permissions.runTerminal ?? 'ALLOW'}</strong></div><div className="setting-row"><span>Git push</span><strong>{selectedProject?.permissions.gitPush ?? 'DENY'}</strong></div></div></section>
           </div>
         )}
       </main>
